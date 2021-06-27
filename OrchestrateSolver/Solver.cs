@@ -107,7 +107,7 @@ namespace OrchestrateSolver
          * current wave will have already been considered. It also allows the progress messages to compute
          * an exact percentage of how finished the whole process is.
          */ 
-        public static void Solve(AcceptStatePredicate predicate, ResultHandler resultHandler)
+        public static void Solve(AcceptStatePredicate predicate, ResultHandler resultHandler, int numThreads = 16)
         {
             var watch = System.Diagnostics.Stopwatch.StartNew();
             
@@ -126,7 +126,7 @@ namespace OrchestrateSolver
             {
                 Console.WriteLine($"Begin wave {context.WaveIndex}/{Verbs.Count}: {currentWave.Count} states");
                 
-                SolveWave(context, currentWave, predicate, resultHandler, nextWaveHandler);
+                SolveWave(context, currentWave, predicate, resultHandler, nextWaveHandler, numThreads);
 
                 // Adopt next wave variables into current wave variables
                 currentWave = next.Select(v => new GameState(v)).ToList();
@@ -166,7 +166,7 @@ namespace OrchestrateSolver
             return result;
         }
 
-        private static void SolveWave(SolverProgress progress, IEnumerable<GameState> currentWaveStates, AcceptStatePredicate predicate, ResultHandler resultHandler, NextWaveHandler nextWaveHandler)
+        private static void SolveWave(SolverProgress progress, IEnumerable<GameState> currentWaveStates, AcceptStatePredicate predicate, ResultHandler resultHandler, NextWaveHandler nextWaveHandler, int numThreads)
         {
             var currentWaveResults = new List<GameState>();
             
@@ -177,8 +177,7 @@ namespace OrchestrateSolver
                 progress.IncrementResultsFound();
             });
 
-            // Iterate over all GameState in the current wave.
-            Parallel.ForEach(currentWaveStates, gameState =>
+            void ScanState(GameState gameState)
             {
                 // Scan each GameState in the current wave.
                 Scan(gameState, progress, predicate, resultCounter, nextWaveHandler);
@@ -186,7 +185,11 @@ namespace OrchestrateSolver
 
                 // Print a status message every once in a while
                 progress.PrintStatus();
-            });
+            }
+            
+            // Iterate over all GameState in the current wave.
+            if (numThreads > 1) Parallel.ForEach(currentWaveStates, new ParallelOptions() { MaxDegreeOfParallelism = numThreads }, ScanState);
+            else foreach (var gameState in currentWaveStates) ScanState(gameState);
 
             // Aggregate wave results in predictable order.
             currentWaveResults.Sort();
