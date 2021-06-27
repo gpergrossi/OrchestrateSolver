@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace OrchestrateSolver
 {
@@ -19,29 +21,54 @@ namespace OrchestrateSolver
         //! Contains some useful information for reporting progress of the Solver.
         public class SolverProgress
         {
-            public int WaveIndex;           //!< Current wave. Equal to the number of Verbs active in all states in the current wave.
-            public int ItemsScanned;        //!< How many items have been scanned so far
-            public int ItemsEliminated;     //!< How many items have been eliminated (either inviable or no need to scan)
-            public int ResultsFound;        //!< How many results have been found
+            private int _waveIndex;           //!< Current wave. Equal to the number of Verbs active in all states in the current wave.
+            private int _itemsScanned;        //!< How many items have been scanned so far
+            private int _itemsEliminated;     //!< How many items have been eliminated (either inviable or no need to scan)
+            private int _resultsFound;        //!< How many results have been found
             
-            public int NextMessageItem;     //!< Threshold of ItemsScanned at which another status message will be printed.
-            public int MessageFrequency;    //!< How often a status message is printed as number of ItemsScanned.
-            
-            //! A cache of all inviable states that have been discovered.
-            public HashSet<GameState> InviableStates;
+            private int _nextMessageItem;     //!< Threshold of ItemsScanned at which another status message will be printed.
+            private int _messageFrequency;    //!< How often a status message is printed as number of ItemsScanned.
 
             //! Total number of all possible game states, used to computer progress percentages.
-            const uint MaxItemsScannable = 1u << Verbs.Count;
+            private const uint MaxItemsScannable = 1u << Verbs.Count;
+            
+            // Lock, used for parallel access protection
+            private object _lock;
             
             public SolverProgress(int waveIndex = 0, int itemsScanned = 0, int itemsEliminated = 0, int resultsFound = 0, int messageFrequency = 50000)
             {
-                this.WaveIndex = waveIndex;
-                this.ItemsScanned = itemsScanned;
-                this.ItemsEliminated = itemsEliminated;
-                this.ResultsFound = resultsFound;
-                this.NextMessageItem = messageFrequency;
-                this.MessageFrequency = messageFrequency;
-                this.InviableStates = new HashSet<GameState>();
+                this._waveIndex = waveIndex;
+                this._itemsScanned = itemsScanned;
+                this._itemsEliminated = itemsEliminated;
+                this._resultsFound = resultsFound;
+                this._nextMessageItem = messageFrequency;
+                this._messageFrequency = messageFrequency;
+                this._lock = new object();
+            }
+
+            public int WaveIndex => _waveIndex;
+            
+            public int IncrementWaveIndex()
+            {
+                return Interlocked.Increment(ref _waveIndex);
+            }
+
+            public int ItemsScanned => _itemsScanned;
+            public int IncrementItemsScanned()
+            {
+                return Interlocked.Increment(ref _itemsScanned);
+            }
+
+            public int ItemsEliminated => _itemsEliminated;
+            public int AddItemsEliminated(int count)
+            {
+                return Interlocked.Add(ref _itemsEliminated, count);
+            }
+
+            public int ResultsFound => _resultsFound;
+            public int IncrementResultsFound()
+            {
+                return Interlocked.Increment(ref _resultsFound);
             }
 
             /**!
@@ -50,13 +77,17 @@ namespace OrchestrateSolver
              */
             public void PrintStatus(bool forced = false)
             {
-                if (forced || ItemsScanned >= NextMessageItem)
+                lock (_lock)
                 {
-                    while (ItemsScanned >= NextMessageItem) NextMessageItem += MessageFrequency;
-                    var scannedPercent = ItemsScanned * 100.0 / MaxItemsScannable;
-                    var eliminatedPercent = ItemsEliminated * 100.0 / MaxItemsScannable;
-                    var totalPercent = (ItemsScanned + ItemsEliminated) * 100.0 / MaxItemsScannable;
-                    Console.WriteLine($"Progress {totalPercent:F1}%: {ResultsFound} solutions. [Scanned {ItemsScanned} ({scannedPercent:F1}%), Eliminated {ItemsEliminated} ({eliminatedPercent:F1}%)]");
+                    if (forced || _itemsScanned >= _nextMessageItem)
+                    {
+                        while (_itemsScanned >= _nextMessageItem) _nextMessageItem += _messageFrequency;
+                        var scannedPercent = _itemsScanned * 100.0 / MaxItemsScannable;
+                        var eliminatedPercent = _itemsEliminated * 100.0 / MaxItemsScannable;
+                        var totalPercent = (_itemsScanned + _itemsEliminated) * 100.0 / MaxItemsScannable;
+                        Console.WriteLine(
+                            $"Progress {totalPercent:F1}%: {_resultsFound} solutions. [Scanned {_itemsScanned} ({scannedPercent:F1}%), Eliminated {_itemsEliminated} ({eliminatedPercent:F1}%)]");
+                    }
                 }
             }
         }
@@ -78,6 +109,8 @@ namespace OrchestrateSolver
          */ 
         public static void Solve(AcceptStatePredicate predicate, ResultHandler resultHandler)
         {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            
             // The next wave handler will add each discovered GameState to a HashSet.
             var next = new HashSet<uint>();
             var nextWaveHandler = new NextWaveHandler(state => next.Add(state));
@@ -93,11 +126,11 @@ namespace OrchestrateSolver
             {
                 Console.WriteLine($"Begin wave {context.WaveIndex}/{Verbs.Count}: {currentWave.Count} states");
                 
-                SolveWave(context, currentWave.GetEnumerator(), currentWave.Count, predicate, resultHandler, nextWaveHandler);
+                SolveWave(context, currentWave, predicate, resultHandler, nextWaveHandler);
 
                 // Adopt next wave variables into current wave variables
                 currentWave = next.Select(v => new GameState(v)).ToList();
-                context.WaveIndex++;
+                context.IncrementWaveIndex();
                 
                 // Clear next wave variables
                 next.Clear();
@@ -108,12 +141,17 @@ namespace OrchestrateSolver
                 {
                     var theoreticalStates = NChooseR(Verbs.Count, context.WaveIndex);
                     eliminatedStates = (int)(theoreticalStates - currentWave.Count);
-                    context.ItemsEliminated += eliminatedStates;
+                    context.AddItemsEliminated(eliminatedStates);
                 }
                 Console.WriteLine($"Wave {context.WaveIndex}/26 completed. Eliminated {eliminatedStates} states.\n");
             }
             
             Console.WriteLine($"Wave {context.WaveIndex} empty. Complete.");
+            
+            watch.Stop();
+            var elapsedMs = watch.ElapsedMilliseconds;
+            var elapsedSeconds = elapsedMs / 1000.0;
+            Console.WriteLine($"Solved in {elapsedSeconds:F1} seconds ({elapsedMs} ms).");
         }
         
         //! Combinatorics function used to compute the number of states possible within a given wave.
@@ -128,29 +166,38 @@ namespace OrchestrateSolver
             return result;
         }
 
-        private static void SolveWave(SolverProgress progress, IEnumerator<GameState> currentWaveStates, int currentWaveCount, AcceptStatePredicate predicate, ResultHandler resultHandler, NextWaveHandler nextWaveHandler)
+        private static void SolveWave(SolverProgress progress, IEnumerable<GameState> currentWaveStates, AcceptStatePredicate predicate, ResultHandler resultHandler, NextWaveHandler nextWaveHandler)
         {
+            var currentWaveResults = new List<GameState>();
+            
             // Wrap the resultHandler so we can count the number of returned results.
             var resultCounter = new ResultHandler(result =>
             {
-                resultHandler(result);
-                progress.ResultsFound++;
+                currentWaveResults.Add(result);
+                progress.IncrementResultsFound();
             });
 
             // Iterate over all GameState in the current wave.
-            while (currentWaveStates.MoveNext())
+            Parallel.ForEach(currentWaveStates, gameState =>
             {
-                // Get the current GameState from the currentWaveStatus Enumerator.
-                var gameState = currentWaveStates.Current;
-                
                 // Scan each GameState in the current wave.
                 Scan(gameState, progress, predicate, resultCounter, nextWaveHandler);
-                progress.ItemsScanned++;
-                
+                progress.IncrementItemsScanned();
+
                 // Print a status message every once in a while
                 progress.PrintStatus();
-            }
+            });
 
+            // Aggregate wave results in predictable order.
+            currentWaveResults.Sort();
+            lock(resultHandler)
+            {
+                foreach (var state in currentWaveResults)
+                {
+                    resultHandler(state);
+                }
+            }
+            
             // Print at least one status message at the end of each wave
             progress.PrintStatus(forced: true);
         }
@@ -176,41 +223,29 @@ namespace OrchestrateSolver
                 // Is this a successful result?
                 if (successPredicate(gameState))
                 {
-                    resultHandler(gameState);
+                    lock(resultHandler) resultHandler(gameState);
                 }
             
                 // We can keep checking more complex GameStates by adding 
                 // a GameState to the next wave for each available Verb.
                 foreach (var verb in gameState.AvailableVerbs)
                 {
-                    nextWaveHandler(gameState.WithVerb(verb));
+                    lock(nextWaveHandler) nextWaveHandler(gameState.WithVerb(verb));
                 }
             }
             else
             {
                 // This GameState is Invalid, can it be restored by adding more Verbs?
-                
-                // Check our InviableStates cache...
-                if (progress.InviableStates.Any(inviableState => IsASubsetOfB(inviableState, gameState)))
-                {
-                    // Inviable state was a subset of the current state.
-                    // That means the current state is inviable.
-                    return;
-                }
-                
-                // Check Inviable using game rules...
                 if (!gameState.IsViable(out var impossibleErrorString))
                 {
                     // State is inviable.
-                    // Add current state to inviable state set.
-                    progress.InviableStates.Add(gameState);
                     return;
                 }
             
                 // Continue with only verbs that help resolve one of the current deficits.
                 foreach (var verb in gameState.GetDesiredVerbs())
                 {
-                    nextWaveHandler(gameState.WithVerb(verb));
+                    lock(nextWaveHandler) nextWaveHandler(gameState.WithVerb(verb));
                 }
             }
             

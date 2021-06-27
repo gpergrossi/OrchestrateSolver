@@ -11,7 +11,7 @@ namespace OrchestrateSolver
      * of convenience methods are provided to aid in understanding the GameState and making
      * calculations about it.
      */
-    public class GameState
+    public class GameState : IComparable<GameState>
     {
         //! Private VerbSet of all the active verbs in this GameState
         private readonly VerbSet _activeVerbs;
@@ -26,6 +26,13 @@ namespace OrchestrateSolver
         public GameState(uint state = 0)
         {
             _activeVerbs = new VerbSet(state);
+        }
+
+        //! Compare GameStates based on their uint identity.
+        public int CompareTo(GameState? other)
+        {
+            if (other == null) return -1;
+            return ((uint) this).CompareTo((uint) other);
         }
 
         //! Hash GameStates based on their uint identity.
