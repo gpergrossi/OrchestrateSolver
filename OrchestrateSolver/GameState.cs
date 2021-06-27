@@ -93,70 +93,88 @@ namespace OrchestrateSolver
         }
 
         //! Returns a list of all Verbs that are NOT currently active in this GameState.
-        public IEnumerable<Verb> AvailableVerbs()
-        {
-            return Verbs.Where(verb => !IsVerbActive(verb));
-        }
-        
+        public IEnumerable<Verb> AvailableVerbs => Verbs.Where(verb => !IsVerbActive(verb));
+
         //! Returns a list of Resources that have negative production values in this GameState.
         public IEnumerable<Resource> NegativeResources => Enum.GetValues(typeof(Resource)).Cast<Resource>().Where(resource => this.GetTotalResourceProduction(resource) < 0);
 
+        //! Returns a list of Verbs that provide a positive production for the target resource.
+        private IEnumerable<Verb> GetTargetVerbs(Resource target) => AvailableVerbs.Where(verb => verb.Resources[(int)target] > 0);
+        
+        //! Returns a total of the production of the target resource across all available Verbs.
+        private int GetAvailableProduction(Resource target) => GetTargetVerbs(target)
+            .Select(verb => verb.GetResourceProduction(target))
+            .Sum();
+
+        //! Returns a list of Verbs that provide a positive production to one or more of this GameState's NegativeResources.
+        public IEnumerable<Verb> GetDesiredVerbs()
+        {
+            var negatives = NegativeResources.ToList();
+            foreach (var verb in AvailableVerbs)
+            {
+                foreach (var resource in negatives.Where(resource => verb.GetResourceProduction(resource) > 0))
+                {
+                    yield return verb;
+                }
+            }
+        }
+        
         /*!
          * Checks if this GameState is still a viable. A GameState is considered Non-Viable if
          * one or more of its NegativeResources are too far negative to be fixed by the sum of
          * all AvailableVerbs' productions of that resource.
          * 
          * @return True if this GameState is viable to bring positive again, else false and the search should not continue from this GameState.
-         * @param message An error message that describes the reason this GameState was declared Non-Viable, or null if the GameState is Viable.
+         * @param message An error message that describes the reason this GameState was declared Non-Viable, or empty if the GameState is Viable.
          */
-        public bool IsViable(out string message)
+        public bool IsViable(out string message, bool verbose = false)
         {
-            var impossibleDeficits = (from resource in NegativeResources
-                let availableProduction = TargetVerbs(resource)
-                    .Select(verb => verb.GetResourceProduction(resource))
-                    .Sum()
-                where this.GetTotalResourceProduction(resource) + availableProduction < 0
-                select resource).ToList();
+            var impossibleDeficits = NegativeResources.Select(
+                resource => new Tuple<Resource, int>(resource, GetAvailableProduction(resource))
+            ).Where(pair => this.GetTotalResourceProduction(pair.Item1) + pair.Item2 < 0);
 
-            if (!impossibleDeficits.Any())
+            using var deficitsEnumerator = impossibleDeficits.GetEnumerator();
+            if (!deficitsEnumerator.MoveNext())
             {
-                message = null;
+                // No inviable deficits, return true (viable)
+                message = "";
                 return true;
             }
-            
-            // Build the output message, explaining which resources are too negative to fix.
-            var sb = new StringBuilder();
-            sb.Append("the following resources are too negative:\n");
-            foreach (var resource in impossibleDeficits)
+            else
             {
-                sb.Append('\t').Append(Enum.GetName(resource)).Append(": ");
-                sb.Append(this.GetTotalResourceProduction(resource));
-                sb.Append(" (Maximum production remaining: ");
-                sb.Append(TargetVerbs(resource)
-                    .Select(verb => verb.GetResourceProduction(resource))
-                    .Sum());
-                sb.Append(")\n");
-            }
-            message = sb.ToString();
-            return false;
-        }
-
-        //! Returns a list of Verbs that provide a positive production for the target resource.
-        public IEnumerable<Verb> TargetVerbs(Resource target) => AvailableVerbs().Where(verb => verb.Resources[(int)target] > 0);
-
-        //! Returns a list of Verbs that provide a positive production to one or more of this GameState's NegativeResources.
-        public IEnumerable<Verb> GetDesiredVerbs()
-        {
-            var set = new VerbSet();
-            foreach (var resource in NegativeResources)
-            {
-                foreach (var verb in TargetVerbs(resource))
+                // We have inviable deficits.
+                if (verbose)
                 {
-                    set.Add(verb);
+                    // Build the output message, explaining which resources are too negative to fix.
+                    var sb = new StringBuilder();
+                    sb.Append("the following resources are too negative:\n");
+                    do
+                    {
+                        if (deficitsEnumerator.Current != null)
+                        {
+                            var resource = deficitsEnumerator.Current.Item1;
+                            var deficit = deficitsEnumerator.Current.Item2;
+                            sb.Append('\t').Append(Enum.GetName(resource)).Append(": ");
+                            sb.Append(this.GetTotalResourceProduction(resource));
+                            sb.Append(" (Maximum production remaining: ");
+                            sb.Append(GetTargetVerbs(resource)
+                                .Select(verb => verb.GetResourceProduction(resource))
+                                .Sum());
+                            sb.Append(")\n");
+                        }
+                    } while (deficitsEnumerator.MoveNext());
+
+                    message = sb.ToString();
                 }
+                else
+                {
+                    message = "";
+                }
+
+                // Return false (inviable) with a optional description message.
+                return false;
             }
-            return set;
         }
-        
+
     }
 }
